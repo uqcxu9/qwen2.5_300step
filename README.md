@@ -94,9 +94,66 @@ python -m verl.trainer.main_ppo \
    - macro: regime 驱动
    - beta 系数混合
 
+## ⚠️ 重要：恢复训练前的准备
+
+**问题：** 完整模型权重 `model_world_size_1_rank_0.pt` (15GB) 无法上传 GitHub。
+
+**解决方案：** 在新 instance 上，需要先生成这个文件：
+
+```bash
+# 1. 克隆此仓库
+git clone https://github.com/uqcxu9/qwen2.5_300step.git
+cd qwen2.5_300step
+
+# 2. 生成完整模型权重（从基础模型 + LoRA 合并）
+python3 << 'EOF'
+import torch
+from transformers import AutoModelForCausalLM
+from peft import PeftModel
+
+# 加载基础模型
+base_model = AutoModelForCausalLM.from_pretrained(
+    "/workspace/models/Qwen2.5-7B-Instruct",
+    torch_dtype=torch.bfloat16,
+    device_map="cpu"
+)
+
+# 加载 LoRA adapter
+model = PeftModel.from_pretrained(
+    base_model, 
+    "./checkpoints_v5/global_step_350/actor/lora_adapter"
+)
+
+# 保存完整状态字典（verl 格式）
+state_dict = model.state_dict()
+torch.save(
+    {"module": state_dict}, 
+    "./checkpoints_v5/global_step_350/actor/model_world_size_1_rank_0.pt"
+)
+print("✅ 模型权重已生成！")
+EOF
+
+# 3. 然后恢复训练
+```
+
+## 已上传的文件清单
+
+| 文件 | 大小 | 状态 |
+|------|------|------|
+| `RL/reward.py` | 12KB | ✅ |
+| `RL/config/econ_grpo_small.yaml` | 4KB | ✅ |
+| `RL/prepare_verl_data.py` | 20KB | ✅ |
+| `checkpoints_v5/.../lora_adapter/` | 78MB | ✅ |
+| `checkpoints_v5/.../huggingface/` | 16MB | ✅ |
+| `checkpoints_v5/.../optim_*.pt` | 155MB | ✅ |
+| `checkpoints_v5/.../extra_state_*.pt` | 15KB | ✅ |
+| `checkpoints_v5/.../data.pt` | 1.5KB | ✅ |
+| `data/verl_dataset_small/` | 10MB | ✅ |
+| `model_world_size_1_rank_0.pt` | 15GB | ❌ 需本地生成 |
+
 ## 注意事项
 
-- 完整模型权重 (~15GB) 未上传，需要从 LoRA adapter 恢复
-- 需要 Qwen2.5-7B-Instruct 基础模型
-- 恢复训练时确保 `resume_mode: auto`
+- 需要 Qwen2.5-7B-Instruct 基础模型 (路径: `/workspace/models/Qwen2.5-7B-Instruct`)
+- 恢复训练前必须先生成 `model_world_size_1_rank_0.pt`
+- 恢复训练时使用 `trainer.resume_mode=auto`
 
