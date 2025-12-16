@@ -1,0 +1,173 @@
+# config/econ_grpo_small.yaml
+
+defaults:
+  - /actor@actor_rollout_ref.actor: dp_actor
+  - /data@data: legacy_data
+  - /ref@actor_rollout_ref.ref: dp_ref
+  - /rollout@actor_rollout_ref.rollout: rollout
+  - /model@actor_rollout_ref.model: hf_model
+  - /critic@critic: dp_critic
+  - /reward_model@reward_model: dp_reward_model
+  - /algorithm@algorithm.rollout_correction: rollout_correction
+  - _self_
+
+# ===== 数据配置：batch_size=2 加速训练 =====
+data:
+  train_files: /workspace/QWEN2.5_42_GRPO_700step-/QWEN2.5_42_GRPO_1/data/verl_dataset_small/train.parquet
+  val_files:   /workspace/QWEN2.5_42_GRPO_700step-/QWEN2.5_42_GRPO_1/data/verl_dataset_small/val.parquet
+  prompt_key: prompt
+  max_prompt_length: 1536      # 增加以容纳完整 prompt
+  max_response_length: 128     # 增加 response 长度
+  train_batch_size: 2          # 从 1 增加到 2
+  val_batch_size: 1
+  return_raw_input_ids: False
+  return_raw_chat: False
+  truncation: left             # 超长时从左侧截断
+  shuffle: True
+  seed: 42
+
+# ===== 模型 & Rollout =====
+actor_rollout_ref:
+  hybrid_engine: True
+
+  model:
+    path: /workspace/models/Qwen2.5-7B-Instruct
+    trust_remote_code: True
+    use_remove_padding: False
+    enable_gradient_checkpointing: True
+    override_config:
+      attn_implementation: eager
+    # LoRA 配置
+    lora_rank: 8
+    lora_alpha: 16
+    target_modules: "all-linear"
+
+  actor:
+    strategy: fsdp
+
+    # 启用动态 batch
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 4096
+
+    grad_clip: 1.0
+    clip_ratio: 0.2
+    entropy_coeff: 0.05      # 从 0.01 升到 0.05，避免策略过早锁死
+
+    use_kl_loss: False
+    loss_agg_mode: token-mean
+
+    optim:
+      lr: 1e-5   # LoRA 用稍大的 lr
+      weight_decay: 0.01
+      lr_warmup_steps_ratio: 0.1
+      lr_scheduler_type: cosine
+      min_lr_ratio: 0.1
+
+    fsdp_config:
+      dtype: bfloat16
+      model_dtype: bfloat16
+      fsdp_size: 1
+      param_offload: True
+      optimizer_offload: True
+      use_torch_compile: False
+      wrap_policy:
+        min_num_params: 0
+
+  ref:
+    fsdp_config:
+      param_offload: True
+      use_torch_compile: False
+      wrap_policy:
+        min_num_params: 0
+    # batch_size=2
+    log_prob_micro_batch_size_per_gpu: 2
+
+  rollout:
+    mode: sync
+    name: vllm
+
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    pipeline_model_parallel_size: 1
+
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+
+    # vLLM 显存/并发限制
+    gpu_memory_utilization: 0.7      # 稍微增加显存利用率
+    max_model_len: 2048      # 增加以匹配 prompt + response 长度
+    max_num_seqs: 2          # batch_size=2
+    enforce_eager: True
+    free_cache_engine: True
+
+    # batch_size=2
+    log_prob_micro_batch_size_per_gpu: 2
+
+    val_kwargs:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      n: 1
+
+# ===== 算法配置 (GRPO) =====
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: True
+  use_kl_in_reward: False
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.001
+
+# ===== Critic & Reward model（都关闭） =====
+critic:
+  enable: False
+
+reward_model:
+  enable: False
+
+# ===== 自定义 Reward Function =====
+custom_reward_function:
+  path: /workspace/QWEN2.5_42_GRPO_700step-/QWEN2.5_42_GRPO_1/RL/reward.py
+  name: compute_score
+
+# ===== 训练器配置 =====
+trainer:
+  balance_batch: True
+  total_epochs: 1                    # 保留为 1（steps 优先）
+  total_training_steps: 700        # 先跑 300 步，后续可接着跑到 700
+  project_name: econ_grpo
+  experiment_name: qwen25_macro_micro_v5
+  logger: ["console"]
+  nnodes: 1
+  n_gpus_per_node: 1
+  save_freq: 350                      # 每 50 步保存 checkpoint
+  val_before_train: False
+  test_freq: 700            # 禁用验证（超过总步数）
+  critic_warmup: 0
+  resume_mode: disable               # 从头开始训练
+  del_local_ckpt_after_load: False
+  default_local_dir: /workspace/QWEN2.5_42_GRPO_700step-/QWEN2.5_42_GRPO_1/checkpoints_v5
+  default_hdfs_dir: null
+  ray_wait_register_center_timeout: 600
+  device: cuda
+  log_val_generations: True          # 保存验证输出到文件
+  esi_redundant_time: 0              # 修复：ESI 冗余时间
+
+global_profiler:
+  enable: False
+  tool: null
+  steps: null
+  profile_continuous_steps: False
+
+transfer_queue:
+  enable: False
+
+ray_kwargs:
+  ray_init:
+    num_cpus: 8
+    num_gpus: 1
