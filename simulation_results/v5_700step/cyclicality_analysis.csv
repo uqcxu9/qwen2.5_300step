@@ -1,0 +1,7 @@
+Variable,Correlation,p-value,Expected,Empirical Range,Direction Match
+Employment Rate,1.0,0.0,Procyclical,~1.0,✓
+Unemployment Rate,-1.0,0.0,Countercyclical,-0.6 to -0.9,✓
+Total Consumption,0.15215485431056736,0.018343241780029936,Procyclical,0.7 to 0.9,✓
+Total Income,0.09743566705005549,0.13228044025535227,Procyclical,0.8 to 1.0,✓
+Total Saving,0.1162218298631933,0.07230454015707613,Countercyclical,-0.3 to 0.3,✗
+Saving Rate,0.11870805492847598,0.0663705516088762,Countercyclical,-0.2 to 0.2,✗
