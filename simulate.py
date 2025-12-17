@@ -34,57 +34,75 @@ with open('config.yaml', "r") as f:
 env_config = run_configuration.get('env')
 
 def get_economic_state(env):
-    """Determine current economic state (based on two consecutive quarters of negative GDP growth)"""
-    if env.world.timestep < 6:  # Not enough data for the first 6 months
-        return "Normal", 0.0, 0.0
-    
-    # Compute unemployment and GDP growth for the latest two quarters (6 months)
-    actions = env.dense_log['actions']
-    
-    # First quarter (months 6–4 before now, i.e., 3 months)
-    q1_employment = []
-    for t in range(max(0, len(actions)-6), max(0, len(actions)-3)):
-        if t < len(actions):
-            employed = sum([1 for i in range(env.num_agents) 
-                          if actions[t].get(str(i), {}).get('SimpleLabor', 0) == 1])
-            q1_employment.append(employed / env.num_agents)
-    
-    # Second quarter (most recent 3 months)
-    q2_employment = []
-    for t in range(max(0, len(actions)-3), len(actions)):
-        employed = sum([1 for i in range(env.num_agents) 
-                      if actions[t].get(str(i), {}).get('SimpleLabor', 0) == 1])
-        q2_employment.append(employed / env.num_agents)
-    
-    if len(q1_employment) == 0 or len(q2_employment) == 0:
-        return "Normal", 0.0, 0.0
-    
-    # GDP proxy = employment rate
-    q1_gdp = np.mean(q1_employment)
-    q2_gdp = np.mean(q2_employment)
-    
-    # Compute growth rates for the two quarters
-    q1_growth = 0
-    if env.world.timestep >= 9:  # Have data for three quarters
-        q0_employment = []
-        for t in range(max(0, len(actions)-9), max(0, len(actions)-6)):
-            if t < len(actions):
-                employed = sum([1 for i in range(env.num_agents) 
-                              if actions[t].get(str(i), {}).get('SimpleLabor', 0) == 1])
-                q0_employment.append(employed / env.num_agents)
-        if len(q0_employment) > 0:
-            q0_gdp = np.mean(q0_employment)
-            q1_growth = (q1_gdp - q0_gdp) / (q0_gdp + 1e-8)
-    
+    """Determine current economic state using nominal GDP = Supply × Price (aligned with training data)."""
+    # need at least 6 months for 2 quarters
+    if env.world.timestep < 6:
+        # unemployment from states (if available), growth=0
+        states = env.dense_log.get("states", [])
+        unemployment_rate = 0.0
+        if len(states) > 0:
+            m = len(states) - 1
+            unemployed, employed = 0, 0
+            for agent_id_str, agent_state in states[m].items():
+                if (not agent_id_str.isdigit()) or (not isinstance(agent_state, dict)):
+                    continue
+                job = agent_state.get("endogenous", {}).get("job")
+                if job == "Unemployment":
+                    unemployed += 1
+                else:
+                    employed += 1
+            labor_force = employed + unemployed
+            unemployment_rate = unemployed / labor_force if labor_force > 0 else 0.0
+        return "Normal", unemployment_rate, 0.0
+
+    actions = env.dense_log.get("actions", [])
+    prices = list(getattr(env.world, "price", []))
+
+    A = 1.0
+    H = 168.0
+
+    def month_supply(t):
+        if t < 0 or t >= len(actions):
+            return 0.0
+        month_actions = actions[t] or {}
+        total = 0.0
+        for agent_id, action in month_actions.items():
+            if agent_id == "p":
+                continue
+            if isinstance(action, (list, tuple)) and len(action) >= 1:
+                labor = int(action[0])
+            elif isinstance(action, dict):
+                labor = int(action.get("SimpleLabor", 0))
+            else:
+                labor = 0
+            total += labor * H * A
+        return total
+
+    def month_price(t):
+        if t < 0:
+            return 1.0
+        if t < len(prices):
+            return float(prices[t])
+        return float(prices[-1]) if prices else 1.0
+
+    def month_gdp(t):
+        return month_supply(t) * month_price(t)
+
+    # last 6 months: t-6..t-1 (since timestep is current month index)
+    T = env.world.timestep
+    q1_months = list(range(T-6, T-3))   # older quarter
+    q2_months = list(range(T-3, T))     # latest quarter
+
+    q1_gdp = sum(month_gdp(t) for t in q1_months)
+    q2_gdp = sum(month_gdp(t) for t in q2_months)
+
     q2_growth = (q2_gdp - q1_gdp) / (q1_gdp + 1e-8)
-    
-    # Determine economic state: two consecutive quarters of negative growth = recession
-    # --- unemployment_rate: align with training data definition (job == "Unemployment") ---
+
+    # unemployment_rate: align with training definition (job == "Unemployment")
     states = env.dense_log.get("states", [])
     if len(states) > 0:
-        m = len(states) - 1  # latest month
-        unemployed = 0
-        employed = 0
+        m = len(states) - 1
+        unemployed, employed = 0, 0
         for agent_id_str, agent_state in states[m].items():
             if (not agent_id_str.isdigit()) or (not isinstance(agent_state, dict)):
                 continue
@@ -97,10 +115,11 @@ def get_economic_state(env):
         unemployment_rate = unemployed / labor_force if labor_force > 0 else 0.0
     else:
         unemployment_rate = 0.0
-    
-    if q1_growth < 0 and q2_growth < 0:
+
+    # state classification (keep your thresholds)
+    if q2_growth < 0 and (q1_gdp > 0):  # simple recession-ish signal
         return "Recession", unemployment_rate, q2_growth
-    elif q2_growth > 0.02:  # Quarterly growth > 2%
+    elif q2_growth > 0.02:
         return "Boom", unemployment_rate, q2_growth
     else:
         return "Normal", unemployment_rate, q2_growth
